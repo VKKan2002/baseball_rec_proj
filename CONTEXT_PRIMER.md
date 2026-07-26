@@ -135,3 +135,49 @@ Then message the AI: **"ready — start Module 1 (ingest.py)"**.
 ## What I need help with
 
 [Fill in your specific ask — e.g., "start Sunday Module 1 (ingest.py)," "quiz me on surplus value math," "mock interview on the 6 hard questions from Kar's prep," "review the README Limitations section for honesty," etc.]
+
+---
+
+# UPDATE — 2026-07-26 (Sunday): XGBoost decision + Mac environment reality
+
+*This section is appended, not a rewrite. Everything above still stands except where noted here.*
+
+## Machine change: building on the Mac, not the Windows box
+
+The verified environment in the primer (venv, Docker Postgres on 15432, 14 deps) lives on the **Windows** machine. This session ran on the **Mac** (`/Users/venky/Documents/GitHub/baseball_rec_proj`). The Mac is essentially bare:
+
+- Python 3.13.5 (anaconda) — NOT the 3.11.9 venv from the primer
+- No project `.venv`
+- pandas ✅, scikit-learn ✅ — but **xgboost ❌, pybaseball ❌ not installed**
+- **No Docker**, no psql, no Postgres server
+- Homebrew ✅ installed
+
+**Environment setup is DEFERRED** — travelling on a phone hotspot, so downloads (xgboost, pybaseball, postgres, pip deps) would incur data charges. Do NOT install anything until off hotspot / on real wifi. When ready, the open decision is **how to run Postgres without Docker**: recommended = `brew install postgresql@16` (native, keeps the resume's "PostgreSQL" claim honest); alternatives = install Docker Desktop, or SQLite (creates a small resume/repo honesty mismatch).
+
+## XGBoost: partially UN-cut — now scoped as a small aging-curve model
+
+Reconsidered the "XGBoost fully cut" decision. New position:
+
+- **Full XGBoost projection model (rival to Steamer): still OUT on this timeline.** Needs multi-season point-in-time backtesting to defend; not a weekend, and a model you can't defend is worse than no model.
+- **XGBoost for the AGING CURVE only: IN scope (optional, resume-motivated).** Replaces the hardcoded polynomial (peak ~27, decline after) with a *learned* curve. Small, defensible, fixes a stated limitation, gives feature importance. Trains in seconds on tens of thousands of rows — **8GB RAM is a non-issue**; the slow part is the pybaseball data pull (network), not training.
+
+### The Steamer ↔ aging-curve division of labor (must own cold)
+
+- **Steamer = year-1 anchor.** It's a *single-season* system — projects next season only (includes its own aging for that one-year jump). You consume it; don't reproduce it.
+- **Aging curve = carries year-1 forward to years 2 & 3** of the contract horizon, since the surplus formula sums over remaining years and Steamer only gives year 1.
+- Example: Steamer says 4.0 WAR at age 29 → year2 (age30) = 4.0 × 0.93 = 3.72 → year3 (age31) = 3.72 × 0.90 = 3.35.
+- **DOUBLE-COUNTING TRAP:** never apply the aging curve to year 1 — Steamer already aged that. Anchor on Steamer for year 1, apply the curve only beyond it. "Steamer sets the height, the curve sets the slope."
+- **Honesty guardrails:** (1) The aging need is *conditional* — could be sidestepped entirely by using **ZiPS** (multi-year, ~5yr projections). So the problem does NOT force building anything. (2) XGBoost vs the polynomial is a *sophistication* choice, not functional — the polynomial already works. So XGBoost is **substantially resume-motivated, and that's fine — but NEVER claim the problem forced it.** Defensible line: *"I model aging myself to own an explainable piece rather than consume another black-box, and used a learned curve so aging reflects position and player quality instead of one asserted shape."*
+- **TODO when env is up:** actually pull `pybaseball.fangraphs_projections` and inspect the dataframe — verify first-hand that Steamer is single-season and what columns exist, rather than asserting it.
+- Known limitation to name unprompted: **survivorship bias** in the aging tail (only players good enough to keep playing at older ages appear → flatters the older-age curve).
+- **requirements.txt cleanup TODO:** if staying with "no full projection model," decide whether to remove xgboost/sklearn or keep them as the aging-curve/extension hook, so the repo tells the same story as the resume.
+
+## Prep-doc (Kar's IBM PDF) conflicts flagged — do NOT recite these verbatim
+
+Read the full 9-page prep PDF. It was written around the **fabricated "AI Engineer" resume**; three scripted answers conflict with the real project and the honesty principle:
+
+1. **"Built with a systems architect I work with" / hard-Q#3 ownership story** — the Kar-collaboration fiction. Reality: solo build + AI acceleration, all design decisions defensible from first principles. Honest answer is stronger.
+2. **Hard-Q#4 "Why XGBoost not a neural net"** — scripted to defend a full projection model that doesn't exist. Real answer: consume Steamer; the only learned model is the (optional) aging curve. Fix resume if it lists XGBoost as a projection model here.
+3. **The 60-second intro** — leads MedStar + baseball, never mentions FHIR Cracker or Vivid Solutions (the real resume's lead projects). Needs a real-resume version leading with FHIR Cracker.
+
+Prep doc is still a good **structure teacher** and **concepts checklist** (Parts 4, 7 solid). Hard-Q#2 (look-ahead bias) is CRITICAL and still only *designed*, not *proven* — the PIT regression test (Module 6) isn't written, so the honest claim is "designed for point-in-time," not "prevents look-ahead bias."
