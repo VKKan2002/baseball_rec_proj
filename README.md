@@ -12,7 +12,7 @@ high-performing player is where the actual trade value lives.
 
 ## How it works
 
-Four stages, each a standalone script, each reading from and writing to a shared
+Five stages, each a standalone script, each reading from and writing to a shared
 Postgres database:
 
 ```mermaid
@@ -20,10 +20,12 @@ flowchart LR
     A["Ingest"] --> B["Resolve"]
     B --> C["Forecast"]
     C --> D["Valuation"]
+    D --> E["Recommend"]
     A -.-> DB[(Postgres)]
     B -.-> DB
     C -.-> DB
     D -.-> DB
+    E -.-> DB
 ```
 
 | Stage | Script | What it does |
@@ -32,6 +34,22 @@ flowchart LR
 | **Resolve** | `src/resolve.py` | Matches each projection's player name to a canonical MLB player ID (handles nicknames, misspellings, and same-name collisions) |
 | **Forecast** | `src/forecast.py` | Trains a regression model on historical stats → realized WAR, then predicts this season's WAR for every projected player |
 | **Valuation** | `src/valuation.py` | Projects WAR forward across a multi-year horizon with an aging curve, converts it to dollars, and subtracts salary to get surplus value |
+| **Recommend** | `src/recommend.py` | Finds plausible 1-for-1 trade candidates: pairs of players on different teams whose surplus values are closest together |
+
+### Why "recommend" looks for the closest surplus value, not the biggest gain
+
+Surplus value is a *universal* number — it doesn't depend on which team holds the
+player. That has a consequence worth stating plainly: under one shared value, a
+1-for-1 trade can never make *both* sides better off except by exact coincidence.
+Whatever surplus Team A gains by receiving a player, Team B loses exactly that —
+it's zero-sum by construction, not a modeling bug. So `recommend.py` doesn't hunt
+for a "both sides gain" trade (structurally not something a value-only model can
+produce); it finds the closest achievable thing — 1-for-1 swaps between two
+different teams whose surplus values are nearly equal, i.e. plausible, roughly-even
+trades. Honest limitation: with no positional-need modeling, some close-in-value
+pairs cross positions no GM would actually consider swapping (a reliever for a
+catcher) even though the dollar values line up — this ranks by value only, not
+roster fit.
 
 ## Data sources
 
@@ -83,7 +101,7 @@ adding value.
 
 | | Same-season reconstruction | **True forecast (N → N+1)** |
 |---|---|---|
-| Batting R² | 0.82 | **0.36** |
+| Batting R² | 0.82 | **0.38** |
 | Pitching R² | 0.56 | **0.16** |
 
 **The true-forecast numbers are the ones that matter** for what this pipeline
@@ -94,20 +112,23 @@ real signal, just less than the same-season number would suggest on its own.
 
 **Ablation findings:**
 - The fielding feature (`prior_def_runs`) holds up under the harder test too —
-  batting R² 0.30 → 0.36 with it included. Not an artifact of the easier evaluation.
+  batting R² 0.33 → 0.38 with it included. Not an artifact of the easier evaluation.
 - Swapping ERA/WHIP/W-L for skill-driven pitcher rate stats is a wash in the true
   forecast (R² 0.164 vs 0.162) despite losing clearly in same-season reconstruction
   (0.56 vs 0.47) — the current feature set stays as-is; there's no evidence a swap
   would help.
+- **Batting: age, runs, RBI, doubles, triples, and caught-stealing** — sitting
+  unused in data already ingested (`season_stats`) and in the raw 2026 CSV (dropped
+  by `ingest.py`'s column mapping) — measurably helped (R² 0.358 → 0.375) and are now
+  **live in `BAT_FEATURES`**, with the ingest/schema/loader plumbing to match
+  (`ingest.py`'s `_HIT_RENAME`, new `ProjectionRaw` columns, `forecast.py`'s loaders).
 - **Model comparison** (Ridge vs. ElasticNet vs. RandomForest vs. XGBoost vs. a
   Ridge+XGBoost blend, same features, same split): for batting, Ridge ties or beats
-  every alternative (R²=0.358) — no evidence a fancier model helps. For pitching,
-  two independent tree-based models (RandomForest and XGBoost) both landed on the
-  same improvement over Ridge (R²=0.164 → 0.219), which is stronger evidence than
-  either alone that pitching has real non-linear structure a straight-line model
-  misses. **Not yet applied to `forecast.py`** — the evidence supports switching the
-  pitch model to a tree-based one while keeping Ridge for batting, but that change is
-  still pending.
+  every alternative — no evidence a fancier model helps. For pitching, two
+  independent tree-based models (RandomForest and XGBoost) both landed on the same
+  improvement over Ridge (R²=0.164 → 0.219), which is stronger evidence than either
+  alone that pitching has real non-linear structure a straight-line model misses.
+  **Shipped** — `forecast.py` now trains Ridge for batting and XGBoost for pitching.
 
 Run either with `python -m src.evaluate` / `python -m src.evaluate_forecast`. Full
 narrative writeup, including why the numbers dropping between the two tests is
@@ -134,10 +155,12 @@ python -m src.ingest
 python -m src.resolve
 python -m src.forecast
 python -m src.valuation
+python -m src.recommend                 # league-wide fairest trades
+python -m src.recommend --team NYM       # fairest trades involving one team
 ```
 
-Each stage logs a summary as it runs — row counts, match rates, and (for valuation)
-the top players by surplus value.
+Each stage logs a summary as it runs — row counts, match rates, top players by
+surplus value, and (for recommend) the closest-value trade candidates found.
 
 ## Manually curated data
 
@@ -163,6 +186,7 @@ src/
   resolve.py    # stage 2
   forecast.py   # stage 3
   valuation.py  # stage 4
+  recommend.py  # stage 5
   evaluate.py            # same-season backtest + ablations
   evaluate_forecast.py   # true N -> N+1 forecast backtest (the honest number)
   main.py       # API layer (in progress, see below)
@@ -177,8 +201,9 @@ data/
 
 - **API layer** (`src/main.py`) — a FastAPI service to expose valuations and trade
   recommendations over HTTP; not yet built.
-- **Trade recommendation logic** — matching valuations across two rosters to surface
-  candidate 1-for-1 trades where both sides gain surplus value; not yet built.
+- **Positional/roster-fit filtering in `recommend.py`** — trade candidates are
+  currently ranked by surplus-value closeness only, with no check on whether the
+  two players even play compatible positions.
 - **Backtest harness** — replaying a past season using only point-in-time data to
   validate that recommendations would have held up, using the `as_of_date` fields
   already in place for this purpose.

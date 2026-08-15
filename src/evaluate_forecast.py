@@ -88,6 +88,7 @@ def _load_lag1_pairs() -> pd.DataFrame:
             ss.role,
             ss.pa, ss.h, ss.hr, ss.bb, ss.so, ss.sb, ss.obp, ss.slg,
             ss.ip, ss.era, ss.whip, ss.so9, ss.gs, ss.w, ss.l, ss.sv,
+            ss.age, ss.r, ss.rbi, ss.doubles, ss.triples, ss.cs,
             this_year.war AS war_this_season,
             next_year.war AS war
         FROM season_stats ss
@@ -219,6 +220,24 @@ def evaluate_defense_ablation(prepared: pd.DataFrame) -> list[dict]:
     ]
 
 
+# age/r/rbi/doubles/triples/cs are now part of the shipped BAT_FEATURES (see
+# forecast.py) -- this is now a permanent regression check (same shape as
+# evaluate_defense_ablation) confirming they're still pulling real weight,
+# not a one-time "should we add this" test anymore.
+_EXTRA_BAT_FEATURES = {"age", "r", "rbi", "doubles", "triples", "cs"}
+
+
+def evaluate_batting_extra_features(prepared: pd.DataFrame) -> list[dict]:
+    bat = prepared[prepared["role"] == "bat"]
+    train, test = _split(bat)
+    without = [f for f in BAT_FEATURES if f not in _EXTRA_BAT_FEATURES]
+    log.info("[extra batting features, true forecast] without vs WITH age/r/rbi/2B/3B/CS:")
+    return [
+        _score("bat: WITHOUT age/r/rbi/2B/3B/CS", test["war"], _fit_predict(train, test, without)),
+        _score("bat: WITH age/r/rbi/2B/3B/CS (current)", test["war"], _fit_predict(train, test, BAT_FEATURES)),
+    ]
+
+
 def evaluate_pitch_feature_swap(prepared: pd.DataFrame) -> list[dict]:
     pit = _add_pitch_rate_stats(prepared[prepared["role"] == "pitch"])
     train, test = _split(pit)
@@ -267,6 +286,9 @@ def main() -> None:
     log.info("=== model ablation: linear vs tree-based ===")
     evaluate_model_ablation(prepared, "bat", BAT_FEATURES)
     evaluate_model_ablation(prepared, "pitch", PITCH_FEATURES)
+
+    log.info("=== extra batting features ablation ===")
+    evaluate_batting_extra_features(prepared)
 
 
 if __name__ == "__main__":

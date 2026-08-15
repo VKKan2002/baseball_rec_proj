@@ -49,7 +49,7 @@ It only has last year's numbers to work from -- exactly like the true-forecast t
 
 | | Same-season reconstruction | **True forecast (real job)** |
 |---|---|---|
-| Batting R² | 0.82 | **0.36** |
+| Batting R² | 0.82 | **0.38** |
 | Pitching R² | 0.56 | **0.16** |
 
 **Nothing broke between these two numbers.** We just switched from an easy question
@@ -108,11 +108,11 @@ Tested five models, identical features, identical train/test split:
 
 | Model | Bat R² | Pitch R² |
 |---|---|---|
-| Ridge (current, linear) | **0.358** | 0.164 |
-| ElasticNet (linear, auto-tuned) | 0.358 | 0.164 |
-| RandomForest (tree-based) | 0.324 | 0.219 |
-| XGBoost (tree-based) | 0.338 | **0.219** |
-| Ridge+XGBoost blend | 0.357 | 0.208 |
+| Ridge (current, linear) | **0.375** | 0.164 |
+| ElasticNet (linear, auto-tuned) | 0.375 | 0.164 |
+| RandomForest (tree-based) | 0.344 | 0.219 |
+| XGBoost (tree-based) | 0.346 | **0.219** |
+| Ridge+XGBoost blend | 0.370 | 0.208 |
 
 **Batting: no gain from a fancier model.** Ridge (the simplest option) ties or wins
 outright. ElasticNet landing identically to Ridge is itself a useful finding -- its
@@ -126,9 +126,35 @@ evidence than one algorithm alone; it means there's real non-linear structure in
 pitching performance a straight-line model can't capture, not a quirk of one
 particular tool.
 
-**Open decision, not yet made:** switch `forecast.py`'s pitch model from Ridge to a
-tree-based model, keeping Ridge for batting. The evidence supports it; the change
-hasn't been applied yet.
+**Shipped:** `forecast.py` now trains Ridge for batting (confirmed best) and XGBoost
+for pitching (confirmed best, twice over). Verified after the switch: the pipeline
+still runs clean end to end, and the top of the pitcher rankings is now Skubal,
+Skenes, Crochet, Sánchez, Webb, Sale, Gilbert, Woo, Fried -- all legitimate ace-tier
+arms, same kind of sanity check as always.
+
+### 4. Are there more inputs already sitting in our own data?
+
+Two places turned out to have unused signal, at no cost to source:
+
+- `age` was already ingested on both the training side (`season_stats.age`) and the
+  2026 inference side (`projections_raw.age`) -- just never used as a feature.
+- The 2026 cheat-sheet CSVs actually contain runs, doubles, triples, RBI, and
+  caught-stealing columns that `ingest.py`'s column mapping was silently dropping,
+  even though the matching columns already existed in `season_stats` from
+  Baseball-Reference.
+
+| Bat features | R² (true forecast) |
+|---|---|
+| Without age/r/rbi/2B/3B/CS | 0.358 |
+| **With age/r/rbi/2B/3B/CS** | **0.375** |
+
+A real, if modest, gain -- confirmed cheaply first against historical data alone,
+*then* wired into production: `ingest.py`'s CSV column mapping was widened to stop
+dropping these columns, `ProjectionRaw` in `models.py` got the new columns (with the
+same "patch the column onto the existing table" approach used for the fielding
+column), and `forecast.py`'s two loaders and `BAT_FEATURES` were updated to match.
+**This one is shipped** -- rerunning `ingest` → `resolve` → `forecast` → `valuation`
+now reflects it.
 
 ## "Is it OK that our numbers are lower than professional systems?"
 

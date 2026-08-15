@@ -120,6 +120,11 @@ class ProjectionRaw(Base):
     obp: Mapped[float | None] = mapped_column(Float, nullable=True)
     slg: Mapped[float | None] = mapped_column(Float, nullable=True)
     ops: Mapped[float | None] = mapped_column(Float, nullable=True)
+    r: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    doubles: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    triples: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rbi: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cs: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     w: Mapped[int | None] = mapped_column(Integer, nullable=True)
     l: Mapped[int | None] = mapped_column(Integer, nullable=True)

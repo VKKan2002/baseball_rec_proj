@@ -284,6 +284,7 @@ _HIT_RENAME = {
     "PA": "pa", "AB": "ab", "H": "h", "HR": "hr", "BB": "bb",
     "K": "so", "SB": "sb",
     "AVG": "avg", "OBP": "obp", "SLG": "slg", "OPS": "ops",
+    "R": "r", "2B": "doubles", "3B": "triples", "RBI": "rbi", "CS": "cs",
 }
 
 _PIT_RENAME = {
@@ -344,6 +345,21 @@ def _ensure_schema() -> None:
     with engine.begin() as conn:
         conn.execute(text(
             "ALTER TABLE war_actuals ADD COLUMN IF NOT EXISTS def_runs DOUBLE PRECISION"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projections_raw ADD COLUMN IF NOT EXISTS r INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projections_raw ADD COLUMN IF NOT EXISTS doubles INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projections_raw ADD COLUMN IF NOT EXISTS triples INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projections_raw ADD COLUMN IF NOT EXISTS rbi INTEGER"
+        ))
+        conn.execute(text(
+            "ALTER TABLE projections_raw ADD COLUMN IF NOT EXISTS cs INTEGER"
         ))
 
 

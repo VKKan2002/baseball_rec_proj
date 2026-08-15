@@ -9,12 +9,16 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sqlalchemy import text
+from xgboost import XGBRegressor
 
 from src.db import engine
 
 # Only columns available in BOTH season_stats (training) and projections_raw (inference)
 DEF_FEATURE = "prior_def_runs"
-BAT_FEATURES = ["pa", "h", "hr", "bb", "so", "sb", "obp", "slg", DEF_FEATURE]
+BAT_FEATURES = [
+    "pa", "h", "hr", "bb", "so", "sb", "obp", "slg", DEF_FEATURE,
+    "age", "r", "rbi", "doubles", "triples", "cs",
+]
 PITCH_FEATURES = ["ip", "era", "whip", "gs", "w", "l", "sv", "so9"]
 
 
@@ -51,6 +55,12 @@ def _load_training_data() -> pd.DataFrame:
             ss.w,
             ss.l,
             ss.sv,
+            ss.age,
+            ss.r,
+            ss.rbi,
+            ss.doubles,
+            ss.triples,
+            ss.cs,
             wa.war
         FROM season_stats ss
         JOIN war_by_season wa
@@ -106,10 +116,24 @@ def _train_models(df: pd.DataFrame, def_hist: pd.DataFrame):
     bat_df = _attach_prior_defense(bat_df, "season", def_hist)
     pit_df = df[df["role"] == "pitch"]
 
+    # Batting: linear (Ridge) beat every alternative tested (ElasticNet,
+    # RandomForest, XGBoost, a Ridge+XGBoost blend) -- see
+    # EVALUATION_WALKTHROUGH.md's model-comparison ablation.
     bat_model = make_pipeline(SimpleImputer(), StandardScaler(), Ridge())
     bat_model.fit(bat_df[BAT_FEATURES], bat_df["war"])
 
-    pitch_model = make_pipeline(SimpleImputer(), StandardScaler(), Ridge())
+    # Pitching: two independent tree-based models (RandomForest and
+    # XGBoost) both beat Ridge by the same margin in a true N->N+1 forecast
+    # (R^2 0.164 -> 0.219) -- strong evidence of real non-linear structure
+    # a straight line can't capture, not a quirk of one algorithm. No
+    # StandardScaler: tree splits don't care about feature scale. Shallow
+    # trees (max_depth=3) + a low learning rate on purpose -- ~6-9k training
+    # rows is a small, noisy dataset, so a high-capacity model is more
+    # likely to fit noise than find structure Ridge is missing.
+    pitch_model = make_pipeline(
+        SimpleImputer(),
+        XGBRegressor(n_estimators=200, max_depth=3, learning_rate=0.05, random_state=0),
+    )
     pitch_model.fit(pit_df[PITCH_FEATURES], pit_df["war"])
 
     return bat_model, pitch_model
@@ -123,7 +147,7 @@ def _load_projections() -> pd.DataFrame:
             pr.role,
             pr.team,
             pr.season,
-            r.mlbam_id,
+            res.mlbam_id,
             pr.pa,
             pr.h,
             pr.hr,
@@ -139,10 +163,16 @@ def _load_projections() -> pd.DataFrame:
             pr.gs,
             pr.w,
             pr.l,
-            pr.sv
+            pr.sv,
+            pr.age,
+            pr.r,
+            pr.rbi,
+            pr.doubles,
+            pr.triples,
+            pr.cs
         FROM projections_raw pr
-        JOIN resolutions r ON r.projection_raw_id = pr.id
-        WHERE r.mlbam_id IS NOT NULL
+        JOIN resolutions res ON res.projection_raw_id = pr.id
+        WHERE res.mlbam_id IS NOT NULL
     """
     with engine.connect() as conn:
         return pd.read_sql(text(query), conn)
