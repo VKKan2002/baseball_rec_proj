@@ -59,6 +59,62 @@ These are deliberate, explainable choices rather than arbitrary constants:
   eventually backtest a recommendation against what was actually knowable at the time,
   without leaking future information into a past decision.
 
+## Model evaluation
+
+The honest question for any prediction model is "how do you know it's any good?" —
+not "do the top names look like real stars," which is weak evidence at best. Two
+scripts answer this with real held-out testing against actual historical outcomes:
+
+- **`src/evaluate.py`** — trains on 2014–2023, tests on 2024–2025, scoring
+  predicted vs. actual WAR for players in those held-out seasons. Also runs two
+  ablations: does the fielding feature actually help, and does swapping in more
+  skill-driven pitcher stats (strikeout/walk/home-run rates instead of ERA/WHIP/W-L)
+  help.
+- **`src/evaluate_forecast.py`** — the harder, more honest version. The test above
+  reconstructs a season's WAR from that *same* season's real stats, which is close
+  to solving a known equation (WAR is partly defined by those stats) rather than
+  forecasting. This script instead trains on season *N*'s stats predicting season
+  *N+1*'s WAR — the same shape of problem the 2026 projections actually pose — and
+  is the number that should be trusted as the real accuracy ceiling.
+
+Both compare the model against two naive baselines (predict the league average;
+predict the player repeats last season) — a model that can't beat those isn't
+adding value.
+
+| | Same-season reconstruction | **True forecast (N → N+1)** |
+|---|---|---|
+| Batting R² | 0.82 | **0.36** |
+| Pitching R² | 0.56 | **0.16** |
+
+**The true-forecast numbers are the ones that matter** for what this pipeline
+actually does. Both still clearly beat the naive baselines (batting: naive best is
+R²=0.22; pitching: naive best is R²=-0.21, since pitcher performance is genuinely
+volatile year to year even before a model is involved) — so the model is adding
+real signal, just less than the same-season number would suggest on its own.
+
+**Ablation findings:**
+- The fielding feature (`prior_def_runs`) holds up under the harder test too —
+  batting R² 0.30 → 0.36 with it included. Not an artifact of the easier evaluation.
+- Swapping ERA/WHIP/W-L for skill-driven pitcher rate stats is a wash in the true
+  forecast (R² 0.164 vs 0.162) despite losing clearly in same-season reconstruction
+  (0.56 vs 0.47) — the current feature set stays as-is; there's no evidence a swap
+  would help.
+- **Model comparison** (Ridge vs. ElasticNet vs. RandomForest vs. XGBoost vs. a
+  Ridge+XGBoost blend, same features, same split): for batting, Ridge ties or beats
+  every alternative (R²=0.358) — no evidence a fancier model helps. For pitching,
+  two independent tree-based models (RandomForest and XGBoost) both landed on the
+  same improvement over Ridge (R²=0.164 → 0.219), which is stronger evidence than
+  either alone that pitching has real non-linear structure a straight-line model
+  misses. **Not yet applied to `forecast.py`** — the evidence supports switching the
+  pitch model to a tree-based one while keeping Ridge for batting, but that change is
+  still pending.
+
+Run either with `python -m src.evaluate` / `python -m src.evaluate_forecast`. Full
+narrative writeup, including why the numbers dropping between the two tests is
+expected (not a bug) and how to defend a lower-than-professional-systems number in an
+interview: see **`EVALUATION_WALKTHROUGH.md`**. For the data pipeline itself
+(ingest → resolve → forecast → valuation), see **`PIPELINE_WALKTHROUGH.md`**.
+
 ## Getting started
 
 **Requirements:** Docker Desktop, Python 3.12+
@@ -107,6 +163,8 @@ src/
   resolve.py    # stage 2
   forecast.py   # stage 3
   valuation.py  # stage 4
+  evaluate.py            # same-season backtest + ablations
+  evaluate_forecast.py   # true N -> N+1 forecast backtest (the honest number)
   main.py       # API layer (in progress, see below)
 data/
   raw/          # source CSVs (season projections)

@@ -19,7 +19,18 @@ PITCH_FEATURES = ["ip", "era", "whip", "gs", "w", "l", "sv", "so9"]
 
 
 def _load_training_data() -> pd.DataFrame:
+    # war_actuals has one row per STINT, so a player traded mid-season has
+    # multiple rows for the same (mlbam_id, season, role). season_stats is
+    # already one row per (mlbam_id, season, role) (see _clean_bref), so
+    # joining straight to war_actuals would fan out and duplicate that row
+    # once per stint. Sum war per season first so the join stays 1:1.
     query = """
+        WITH war_by_season AS (
+            SELECT mlbam_id, season, role, SUM(war) AS war
+            FROM war_actuals
+            WHERE war IS NOT NULL
+            GROUP BY mlbam_id, season, role
+        )
         SELECT
             ss.mlbam_id,
             ss.season,
@@ -42,11 +53,10 @@ def _load_training_data() -> pd.DataFrame:
             ss.sv,
             wa.war
         FROM season_stats ss
-        JOIN war_actuals wa
+        JOIN war_by_season wa
             ON ss.mlbam_id = wa.mlbam_id
             AND ss.season  = wa.season
             AND ss.role    = wa.role
-        WHERE wa.war IS NOT NULL
     """
     with engine.connect() as conn:
         return pd.read_sql(text(query), conn)
