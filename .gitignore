@@ -1,6 +1,4 @@
 .env
-data/raw/
-data/snapshots/
 __pycache__/
 *.pyc
 .pytest_cache/
