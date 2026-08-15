@@ -16,6 +16,13 @@ Layered strategy, most confident first:
     6. unresolved     - no candidate above threshold
     7. empty_name     - projection had a blank name
 
+Manual overrides (data/manual_overrides.csv) are checked FIRST, ahead of the
+automated layers above, for cases the algorithm can't or shouldn't guess:
+nickname mismatches against Chadwick (e.g. "Matthew Boyd" -> "Matt Boyd"),
+same-name collisions disambiguated by hand, and rookies with no MLBAM id in
+Chadwick yet (tracked with a blank mlbam_id so they show up as
+"rookie_pending" instead of a plain "unresolved").
+
 Writes one row per projection into `resolutions`. Idempotent by full
 rebuild (TRUNCATE + INSERT) since the table is fully derivable.
 
@@ -39,6 +46,8 @@ from sqlalchemy import text
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+OVERRIDES_PATH = _ROOT / "data" / "manual_overrides.csv"
 
 from src.db import engine  # noqa: E402
 from src.models import Base  # noqa: E402
@@ -142,6 +151,19 @@ def _load_recent_teams(current_season: int) -> dict[int, set[str]]:
     return d
 
 
+def _load_overrides() -> dict[tuple[str, str], int | None]:
+    """(normalized name, team) -> mlbam_id, or None for a tracked-but-unresolved
+    rookie (blank mlbam_id in the CSV -- no Chadwick id assigned yet)."""
+    if not OVERRIDES_PATH.exists():
+        return {}
+    df = pd.read_csv(OVERRIDES_PATH, dtype={"mlbam_id": "Int64"})
+    out: dict[tuple[str, str], int | None] = {}
+    for row in df.itertuples(index=False):
+        key = (normalize_name(row.player_name), str(row.team).strip())
+        out[key] = int(row.mlbam_id) if pd.notna(row.mlbam_id) else None
+    return out
+
+
 def _load_projections() -> pd.DataFrame:
     with engine.connect() as c:
         return pd.read_sql(
@@ -174,11 +196,19 @@ def _resolve_one(
     active_names: list[str],
     active_ids: list[int],
     team_by_mlbam: dict[int, set[str]],
+    overrides: dict[tuple[str, str], int | None],
 ) -> tuple[int | None, str, float, int]:
     """Return (mlbam_id_or_None, method, score, candidate_count)."""
     norm = normalize_name(name)
     if not norm:
         return None, "empty_name", 0.0, 0
+
+    override_key = (norm, str(team).strip() if team else "")
+    if override_key in overrides:
+        mlbam = overrides[override_key]
+        if mlbam is not None:
+            return mlbam, "manual_override", 100.0, 1
+        return None, "rookie_pending", 0.0, 0
 
     candidates = by_norm.get(norm, [])
     n = len(candidates)
@@ -265,9 +295,11 @@ def resolve_all(current_season: int = 2026) -> pd.DataFrame:
     active_pool = _load_active_pool(current_season)
     team_by_mlbam = _load_recent_teams(current_season)
     by_norm, active_names, active_ids = _build_indexes(players, active_pool)
+    overrides = _load_overrides()
     log.info(
-        "loaded %d players; %d active since %d",
+        "loaded %d players; %d active since %d; %d manual overrides (%d pending rookie ids)",
         len(players), len(active_pool), current_season - ACTIVE_LOOKBACK_SEASONS + 1,
+        len(overrides), sum(1 for v in overrides.values() if v is None),
     )
 
     projs = _load_projections()
@@ -279,6 +311,7 @@ def resolve_all(current_season: int = 2026) -> pd.DataFrame:
         mlbam, method, score, cand = _resolve_one(
             row.player_name, row.team,
             by_norm, active_pool, active_names, active_ids, team_by_mlbam,
+            overrides,
         )
         results.append({
             "projection_raw_id": row.id,

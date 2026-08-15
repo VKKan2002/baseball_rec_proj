@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import Date, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Date, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -83,6 +83,9 @@ class WarActual(Base):
     war: Mapped[float | None] = mapped_column(Float, nullable=True)
     war_rep: Mapped[float | None] = mapped_column(Float, nullable=True)
     waa: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # fielding runs above average. bwar_bat() only -- bwar_pitch() has no
+    # equivalent column, so this is always NULL for role='pitch' rows.
+    def_runs: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ProjectionRaw(Base):
@@ -184,6 +187,27 @@ class SeasonStats(Base):
     so9: Mapped[float | None] = mapped_column(Float, nullable=True)  # strikeouts per 9 innings (k/9)
     so_bb: Mapped[float | None] = mapped_column(Float, nullable=True) # strikeout-to-walk ratio (command metric)
     bf: Mapped[int | None] = mapped_column(Integer, nullable=True)   # batters faced (pitcher's equivalent of PA)
+
+
+class Valuation(Base):
+    """Surplus value from valuation.py: projections (year-1 WAR) + an aging
+    curve for years 2-3, minus salary (war_actuals for year 0, manually
+    curated data/manual_contracts.csv for years 1+).
+
+    Fully derivable from those inputs, so it's rebuilt per as_of_date
+    (delete-by-date then insert) same as the other derived tables.
+    """
+    __tablename__ = "valuations"
+
+    mlbam_id: Mapped[int] = mapped_column(ForeignKey("players.mlbam_id"), primary_key=True)
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+
+    age: Mapped[int] = mapped_column(Integer)
+    war_year1: Mapped[float] = mapped_column(Float)
+    surplus_value: Mapped[float] = mapped_column(Float)
+    # true if any horizon year fell back to LEAGUE_MINIMUM_SALARY because no
+    # real salary was found (missing from war_actuals and manual_contracts.csv)
+    salary_estimated: Mapped[bool] = mapped_column(Boolean)
 
 
 class Resolution(Base):

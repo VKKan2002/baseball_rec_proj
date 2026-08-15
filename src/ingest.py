@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -31,6 +32,16 @@ if str(_ROOT) not in sys.path:
 from src.config import RAW_DIR, SNAPSHOTS_DIR  # noqa: E402
 from src.db import engine  # noqa: E402
 from src.models import Base, Player, ProjectionRaw, SeasonStats, WarActual  # noqa: E402
+
+# bref will 429/temporarily-block a burst of requests with no delay between
+# them (this is what killed 2020-2025 previously). Cache successful pulls to
+# disk so a rerun after a mid-loop failure doesn't re-hit years we already
+# have, and pace requests + retry with backoff on the ones that do fail.
+pyb.cache.enable()
+
+_REQUEST_DELAY_SEC = 5.0
+_MAX_RETRIES = 4
+_BACKOFF_BASE_SEC = 20.0
 
 TRAIN_SEASONS = range(2014, 2026)  # 2014..2025 inclusive, ~12 years for the WAR estimator
 
@@ -57,6 +68,30 @@ def _replace_for_date(table_name: str, as_of: date, date_col: str = "as_of_date"
             text(f"DELETE FROM {table_name} WHERE {date_col} = :d"),
             {"d": as_of},
         )
+
+
+def _with_retry(fn, *args, label: str, **kwargs):
+    """Call fn(*args, **kwargs), retrying on failure with exponential backoff.
+
+    bref throttles/blocks bursts of requests rather than returning a clean
+    429, so failures here are treated as rate-limit-shaped regardless of the
+    exact exception type.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt == _MAX_RETRIES:
+                break
+            wait = _BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+            log.warning(
+                "%s failed (attempt %d/%d): %s -- backing off %.0fs",
+                label, attempt, _MAX_RETRIES, exc, wait,
+            )
+            time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 
 def _write(df: pd.DataFrame, table_name: str, as_of: date | None) -> None:
@@ -110,29 +145,35 @@ _BWAR_COMMON = [
     "G", "salary", "WAR", "WAR_rep", "WAA",
 ]
 
+# fielding runs above average -- bwar_bat() only, bwar_pitch() has no
+# equivalent column (fielding isn't broken out separately for pitchers here).
+_BWAR_BAT_ONLY = ["runs_above_avg_def"]
+
 _BWAR_RENAME = {
-    "mlb_ID":      "mlbam_id",
-    "year_ID":     "season",
-    "stint_ID":    "stint",
-    "player_ID":   "bbref_id",
-    "team_ID":     "team_id",
-    "lg_ID":       "league_id",
-    "G":           "games",
-    "salary":      "salary_usd",
-    "WAR":         "war",
-    "WAR_rep":     "war_rep",
-    "WAA":         "waa",
+    "mlb_ID":              "mlbam_id",
+    "year_ID":             "season",
+    "stint_ID":            "stint",
+    "player_ID":           "bbref_id",
+    "team_ID":             "team_id",
+    "lg_ID":               "league_id",
+    "G":                   "games",
+    "salary":              "salary_usd",
+    "WAR":                 "war",
+    "WAR_rep":             "war_rep",
+    "WAA":                 "waa",
+    "runs_above_avg_def":  "def_runs",
 }
 
 
 def fetch_war_actuals(as_of: date) -> pd.DataFrame:
     """Baseball-Reference bWAR bat + pitch, unioned with a `role` discriminator."""
     log.info("fetching bwar_bat...")
-    bat = pyb.bwar_bat()[_BWAR_COMMON].copy()
+    bat = pyb.bwar_bat()[_BWAR_COMMON + _BWAR_BAT_ONLY].copy()
     bat["role"] = "bat"
 
     log.info("fetching bwar_pitch...")
     pit = pyb.bwar_pitch()[_BWAR_COMMON].copy()
+    pit["runs_above_avg_def"] = float("nan")
     pit["role"] = "pitch"
 
     df = pd.concat([bat, pit], ignore_index=True)
@@ -202,13 +243,20 @@ def _fetch_year_pitch(year: int) -> pd.DataFrame:
 def fetch_season_stats(as_of: date) -> pd.DataFrame:
     """Pull batting_stats_bref + pitching_stats_bref for TRAIN_SEASONS."""
     frames: list[pd.DataFrame] = []
+    failed_years: list[int] = []
     for year in TRAIN_SEASONS:
         log.info("fetching bref bat + pitch for %d...", year)
         try:
-            frames.append(_fetch_year_bat(year))
-            frames.append(_fetch_year_pitch(year))
+            frames.append(_with_retry(_fetch_year_bat, year, label=f"batting_stats_bref({year})"))
+            time.sleep(_REQUEST_DELAY_SEC)
+            frames.append(_with_retry(_fetch_year_pitch, year, label=f"pitching_stats_bref({year})"))
         except Exception as exc:  # noqa: BLE001
-            log.warning("skipped %d: %s", year, exc)
+            log.error("giving up on %d after retries: %s", year, exc)
+            failed_years.append(year)
+        time.sleep(_REQUEST_DELAY_SEC)
+
+    if failed_years:
+        log.error("season_stats: failed years after retries: %s", failed_years)
 
     if not frames:
         return pd.DataFrame()
@@ -289,11 +337,21 @@ def load_projections(as_of: date, season: int = 2026) -> None:
 
 # ------------------------------------------------------------------ main ----
 
+def _ensure_schema() -> None:
+    """create_all only creates missing tables, not columns added to existing
+    ones -- no Alembic in this project, so patch new columns in by hand."""
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE war_actuals ADD COLUMN IF NOT EXISTS def_runs DOUBLE PRECISION"
+        ))
+
+
 def main(as_of: date | None = None) -> None:
     as_of = as_of or date.today()
     log.info("ingest starting as_of=%s", as_of)
 
-    Base.metadata.create_all(engine)
+    _ensure_schema()
 
     load_players()
     load_war_actuals(as_of)

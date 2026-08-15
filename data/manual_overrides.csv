@@ -1,0 +1,15 @@
+player_name,team,primary_pos,mlbam_id,note
+Matthew Boyd,CHC,SP,571510,Chadwick lists him as "Matt Boyd"; confirmed via CHC pitch role in war_actuals
+Michael King,SD,SP,650633,Chadwick lists him as "Mike King"; confirmed via SDP pitch role in war_actuals
+Luis Castillo,SEA,SP,622491,"Name collision with a low-usage 622379; confirmed by full-time SEA/CHW pitch role and games count in war_actuals"
+Luis Garcia Jr.,WSN,2B,671277,"Name collision with journeyman reliever 472610; confirmed by full-time WSN bat role in war_actuals"
+Aidan Miller,PHI,SS,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Brock Wilken,MIL,3B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Charlie Condon,COL,1B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Emmanuel Rodriguez,MIN,OF,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Jett Williams,MIL,SS,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Max Anderson,DET,2B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Ryan Clifford,NYM,1B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Sung-Mun Song,SD,3B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Tre' Morgan,TB,1B,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
+Walker Jenkins,MIN,OF,,Prospect -- no MLBAM id in Chadwick register yet (not yet debuted)
