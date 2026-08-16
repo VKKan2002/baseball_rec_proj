@@ -21,11 +21,13 @@ flowchart LR
     B --> C["Forecast"]
     C --> D["Valuation"]
     D --> E["Recommend"]
+    E -.->|"replay pinned to\na past as_of_date"| F["Backtest"]
     A -.-> DB[(Postgres)]
     B -.-> DB
     C -.-> DB
     D -.-> DB
     E -.-> DB
+    F -.-> DB
 ```
 
 | Stage | Script | What it does |
@@ -35,6 +37,7 @@ flowchart LR
 | **Forecast** | `src/forecast.py` | Trains a regression model on historical stats → realized WAR, then predicts this season's WAR for every projected player |
 | **Valuation** | `src/valuation.py` | Projects WAR forward across a multi-year horizon with an aging curve, converts it to dollars, and subtracts salary to get surplus value |
 | **Recommend** | `src/recommend.py` | Finds plausible 1-for-1 trade candidates: pairs of players on different teams whose surplus values are closest together |
+| **Backtest** | `src/backtest.py` | Replays `recommend.py` pinned to a past decision date (`--as-of`), proving the read path never sees a valuation written after that date |
 
 ### Why "recommend" looks for the closest surplus value, not the biggest gain
 
@@ -45,11 +48,16 @@ Whatever surplus Team A gains by receiving a player, Team B loses exactly that �
 it's zero-sum by construction, not a modeling bug. So `recommend.py` doesn't hunt
 for a "both sides gain" trade (structurally not something a value-only model can
 produce); it finds the closest achievable thing — 1-for-1 swaps between two
-different teams whose surplus values are nearly equal, i.e. plausible, roughly-even
-trades. Honest limitation: with no positional-need modeling, some close-in-value
-pairs cross positions no GM would actually consider swapping (a reliever for a
-catcher) even though the dollar values line up — this ranks by value only, not
-roster fit.
+different teams whose surplus values are nearly equal *and* whose eligible
+positions overlap, i.e. plausible, roughly-even trades. Eligibility is each
+player's primary position plus every position listed in the cheat sheet's
+"OTHER POS" column, which also captures multi-position and two-way players
+(e.g. Ohtani: DH + SP). This is still a coarse heuristic — it says "could
+plausibly occupy the same roster spot," not "a real GM would make this specific
+trade," and there's no team-level positional-need modeling — but it removes the
+obviously-wrong matches a value-only ranking produces, like pairing a reliever
+with a catcher purely because the dollar figures happen to be close. Pass
+`--any-position` to disable the filter and rank by surplus-value closeness only.
 
 ## Data sources
 
@@ -136,6 +144,21 @@ expected (not a bug) and how to defend a lower-than-professional-systems number 
 interview: see **`EVALUATION_WALKTHROUGH.md`**. For the data pipeline itself
 (ingest → resolve → forecast → valuation), see **`PIPELINE_WALKTHROUGH.md`**.
 
+The two evaluations above score the WAR model in isolation. **`src/evaluate_backtest.py`**
+goes one layer further and scores the *product* — surplus value and recommend.py's
+fair-trade pairing — against real 2022/2023 outcomes:
+
+```bash
+python -m src.evaluate_backtest --target-season 2023
+```
+
+Headline results (full writeup in `EVALUATION_WALKTHROUGH.md`): the naive "repeat last
+season" baseline actually edges out the model on surplus-value rank correlation — an
+honest negative reported rather than hidden — but pairs `recommend.py` calls "fair"
+based on predicted surplus stayed **~40-45% closer in realized value** than random
+pairs, in both seasons tested. The practical takeaway: trust this system's *relative*
+comparisons (is A a fair trade for B?) more than its *absolute* dollar figures.
+
 ## Getting started
 
 **Requirements:** Docker Desktop, Python 3.12+
@@ -157,6 +180,34 @@ python -m src.forecast
 python -m src.valuation
 python -m src.recommend                 # league-wide fairest trades
 python -m src.recommend --team NYM       # fairest trades involving one team
+python -m src.recommend --any-position   # disable roster-fit filtering
+```
+
+## API
+
+`src/main.py` is a thin FastAPI layer over the same functions the CLI scripts use —
+no separate implementation of "what's a player's surplus value" or "what's a fair
+trade." Three read-only endpoints:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /players/{mlbam_id}/valuation` | One player's latest surplus value |
+| `GET /recommend?team=&top_n=&any_position=` | Fairest 1-for-1 trades today (same as `python -m src.recommend`) |
+| `GET /backtest?as_of=&team=&top_n=&any_position=` | Fairest trades as of a past decision date (same as `python -m src.backtest`) |
+
+Run the whole stack — Postgres + API — with Docker:
+
+```bash
+docker compose up -d --build
+open http://localhost:8000/docs   # interactive Swagger UI
+```
+
+Or run just the API locally against a Postgres already started with `docker compose up
+-d` (uses `.env`'s `localhost:15432`, not the container-to-container `postgres:5432`
+that `docker-compose.yml`'s `api` service uses):
+
+```bash
+uvicorn src.main:app --reload
 ```
 
 Each stage logs a summary as it runs — row counts, match rates, top players by
@@ -187,36 +238,65 @@ src/
   forecast.py   # stage 3
   valuation.py  # stage 4
   recommend.py  # stage 5
+  backtest.py   # stage 6 -- replay recommend.py pinned to a past as_of_date
   evaluate.py            # same-season backtest + ablations
   evaluate_forecast.py   # true N -> N+1 forecast backtest (the honest number)
-  main.py       # API layer (in progress, see below)
+  evaluate_backtest.py   # scores surplus value + fair-trade pairing against real outcomes
+  main.py       # FastAPI layer -- 3 endpoints over the same functions the CLI uses
 data/
   raw/          # source CSVs (season projections)
   snapshots/    # parquet snapshots of every ingest run, by date
   manual_overrides.csv
   manual_contracts.csv
+tests/
+  test_backtest_pit.py   # proves the point-in-time read path can't see future-dated rows
 ```
 
 ## Currently in progress
 
-- **API layer** (`src/main.py`) — a FastAPI service to expose valuations and trade
-  recommendations over HTTP; not yet built.
-- **Positional/roster-fit filtering in `recommend.py`** — trade candidates are
-  currently ranked by surplus-value closeness only, with no check on whether the
-  two players even play compatible positions.
-- **Backtest harness** — replaying a past season using only point-in-time data to
-  validate that recommendations would have held up, using the `as_of_date` fields
-  already in place for this purpose.
 - **`data/manual_contracts.csv`** — currently empty; needs real 2027/2028 salary
   figures for whichever players get evaluated in actual trade scenarios.
 - A small number of just-drafted prospects are tracked in `data/manual_overrides.csv`
   with no player ID yet, since they haven't appeared in the public registry — these
   resolve automatically once they debut and gain one.
+- **No auth, no writes** on the API — read-only endpoints over already-computed
+  valuations, matching the "it's a demo" scope decision (see Known limitations).
+
+## Backtesting and the point-in-time guarantee
+
+`recommend.py`'s loader never does a bare "give me the latest valuations" read —
+every query resolves to `MAX(as_of_date) WHERE as_of_date <= :cutoff`, where the
+default cutoff (today) reproduces the old "just give me latest" behavior, but any
+earlier cutoff can only ever see rows that existed as of that date. `src/backtest.py`
+exercises this directly: it re-runs the exact same recommend.py query path pinned to
+a `--as-of` date you choose.
+
+```bash
+python -m src.backtest --as-of 2026-08-15
+python -m src.backtest --as-of 2026-08-15 --team NYM
+```
+
+`tests/test_backtest_pit.py` is the regression test for this: it inserts one
+valuations row dated in the past and one dated far in the future for a throwaway
+player, then asserts a cutoff between them returns the past row and never the future
+one — the specific failure mode a bare `MAX(as_of_date)` would be blind to.
+
+**Honest scope note:** this pipeline has been run once, so there's currently only one
+populated `as_of_date` in `valuations` — there's no historical *projection* data (what
+a system like Steamer said about a player before a past season started) to replay a
+real past season against. `season_stats` / `war_actuals` hold realized, after-the-fact
+performance for 2014–2025, not point-in-time projections, so they can't stand in for
+that. What's proven today is narrower and still real: the read path is provably
+incapable of leaking a future-dated row into a past decision. As this pipeline gets
+run repeatedly over time and accumulates more `valuations` snapshots, `--as-of`
+starts replaying actual history instead of just re-deriving today's answer.
 
 ## Known limitations
 
 - The aging curve is an explainable heuristic, not learned from data.
 - Multi-player trades (2-for-1 and larger) are out of scope — the search space grows
   combinatorially; this focuses on cleanly demonstrating 1-for-1 valuation instead.
+- The backtest harness proves point-in-time query correctness, not a validated replay
+  of a real past season (see above) — there's only one `valuations` snapshot so far.
 - No auth, frontend, or cloud deployment — this is a local, containerized demo
   (Docker + Postgres + the pipeline scripts).

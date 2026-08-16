@@ -176,9 +176,80 @@ lower number than a well-funded system with a full data team, the strong answer 
    someone else catches it for you, is a stronger signal of competence than a high
    number alone would be.
 
+## One more question: does the *product* work, not just the model?
+
+Everything above evaluates the WAR model in isolation -- MAE/RMSE/R² on a raw number.
+That's necessary but not sufficient: the actual product isn't "predict WAR," it's
+"tell a team which trades are worth making." `src/evaluate_backtest.py` carries the
+evaluation one layer further, through the real surplus-value math (`valuation.py`'s
+aging curve + $/WAR conversion + real historical salary) and the real `recommend.py`
+pairing logic, then checks both against what actually happened in 2022 and 2023 (the
+two seasons with a full 3-year window of real salary data on the books to run the
+production formula honestly).
+
+```bash
+python -m src.evaluate_backtest --target-season 2023
+python -m src.evaluate_backtest --target-season 2022
+```
+
+### Result 1: surplus-value rank accuracy -- an honest, slightly negative finding
+
+| Target season | Spearman(model surplus, realized value) | Spearman(naive "repeat last season" surplus, realized value) |
+|---|---|---|
+| 2023 | 0.214 | **0.239** |
+| 2022 | 0.192 | **0.212** |
+
+**The naive baseline slightly beat the trained model on this specific metric, in both
+seasons tested.** This looks like it contradicts the R² results above, but it's
+measuring something different, not overturning them:
+
+- The R² tests score *how close* a single-season WAR prediction is to reality
+  (squared error) -- the model clearly wins there, confirmed on two held-out seasons.
+- This test scores *rank correlation of dollar surplus* -- year-1 WAR carried through
+  the aging curve and real salary, then compared by ranking, not by error magnitude.
+  Spearman only cares whether the ORDER is right, and "assume the player repeats last
+  year" is a strong prior for ranking purposes specifically, even where its year-over-
+  year *error* is worse in absolute terms (already established in the true-forecast
+  ablation above: the model beats naive on R² for both roles).
+
+Reporting a result that doesn't flatter the system is the same discipline this project
+already committed to above -- an honest negative is worth more than a hidden one. The
+practical read: surplus value should currently be treated as a *reasonable, not
+precise* ranking signal, consistent with the aging curve already being a stated
+heuristic rather than a validated one (see README's Known Limitations).
+
+### Result 2: fair-trade pairing -- a real, positive finding
+
+| Target season | Median realized-value gap, 20 model-picked "fair" pairs | Median realized-value gap, 500 random pairs |
+|---|---|---|
+| 2023 | **$5,262,000** | $8,881,000 |
+| 2022 | **$4,432,500** | $8,355,000 |
+
+Pairs `recommend.py` calls "fair" -- close *predicted*, pre-season surplus value --
+stayed roughly **40-45% closer in *realized* value** than random pairs, in both
+seasons tested. That's the specific, narrow claim `recommend.py` actually makes
+("these two players' value is a realistic swap"), and it held up out-of-sample. This
+result is more convincing than Result 1 because it's a relative, ranking-shaped claim
+(A and B are close) rather than an absolute one (A is worth exactly $X) -- and ranking
+is exactly what Spearman in Result 1 shows the model is weaker at than expected, yet
+the *pairing* signal survives it. A useful, defensible instinct going forward: trust
+this system's relative comparisons more than its absolute dollar figures.
+
+### What isn't tested here
+
+Only year 1 (the season the model actually predicts) is scored against reality. Years
+2-3 of the real surplus formula are carried forward by the aging curve -- a stated,
+non-learned assumption -- so there's nothing here that legitimately validates that
+curve against real future outcomes without conflating it with the forecast model's own
+accuracy. Historical `season_stats`/`war_actuals` also don't carry a player's position
+(only the current 2026 cheat sheet does), so the fair-trade check above runs with
+roster-fit filtering off -- it's testing the surplus-closeness claim specifically, not
+the position-fit heuristic added later.
+
 ## Files in this evaluation
 
 | File | What it does |
 |---|---|
 | `src/evaluate.py` | Same-season reconstruction backtest + fielding/pitch-feature ablations |
 | `src/evaluate_forecast.py` | True N→N+1 forecast backtest (the honest number) + all ablations including the 5-model comparison |
+| `src/evaluate_backtest.py` | Evaluates the *product*, not just the model: surplus-value rank accuracy and recommend.py's fair-trade pairing claim, both against real 2022/2023 outcomes |
