@@ -45,8 +45,13 @@ from src.forecast import (  # noqa: E402
     BAT_FEATURES,
     DEF_FEATURE,
     PITCH_FEATURES,
+    SC_BAT_FEATURES,
+    SC_PITCH_FEATURES,
     _attach_prior_defense,
+    _attach_statcast,
     _load_defense_history,
+    _load_statcast_history,
+    _add_derived_features,
 )
 
 logging.basicConfig(
@@ -106,17 +111,25 @@ def _load_lag1_pairs() -> pd.DataFrame:
     return df.replace([np.inf, -np.inf], np.nan)
 
 
-def _prepare(raw: pd.DataFrame, def_hist: pd.DataFrame) -> pd.DataFrame:
-    """Attach the fielding feature for bat rows. Pass target_season (not
-    stat_season) as the anchor: _attach_prior_defense finds the most recent
-    def_hist season strictly before it, which resolves to stat_season's own
-    real fielding value here -- the player's most recent known defensive
-    performance at forecast time. That's NOT leakage: the target is season
-    N+1's WAR, and stat_season's fielding is fully known before N+1 starts.
-    """
+def _prepare(raw: pd.DataFrame, def_hist: pd.DataFrame, sc_hist: pd.DataFrame) -> pd.DataFrame:
+    """Attach fielding, Statcast, and derived features.
+    war_this_season (stat season's real WAR) is copied to prior_war — fully
+    known before target_season starts, so not leakage."""
+    raw = _add_derived_features(raw)
+    raw["prior_war"] = raw["war_this_season"]
     bat = _attach_prior_defense(raw[raw["role"] == "bat"].copy(), "target_season", def_hist)
+    # Statcast: exact=True matches stat_season's own Statcast (same season, no leakage)
+    bat = _attach_statcast(bat, "stat_season", sc_hist, "bat", exact=True)
     pit = raw[raw["role"] == "pitch"].copy()
+    pit = _attach_statcast(pit, "stat_season", sc_hist, "pitch", exact=True)
     return pd.concat([bat, pit], ignore_index=True)
+
+
+_SC_ALL = set(SC_BAT_FEATURES + SC_PITCH_FEATURES)
+_BAT_FEATURES_BASELINE = [f for f in BAT_FEATURES if f not in ("age_sq", "prior_war") and f not in _SC_ALL]
+_PITCH_FEATURES_BASELINE = [f for f in PITCH_FEATURES if f != "prior_war" and f not in _SC_ALL]
+_BAT_FEATURES_NO_SC = [f for f in BAT_FEATURES if f not in _SC_ALL]
+_PITCH_FEATURES_NO_SC = [f for f in PITCH_FEATURES if f not in _SC_ALL]
 
 
 def _split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -264,12 +277,31 @@ def evaluate_model_ablation(prepared: pd.DataFrame, role: str, features: list[st
     ]
 
 
+def evaluate_new_features_ablation(prepared: pd.DataFrame) -> list[dict]:
+    """Stepwise ablation: baseline -> +prior_war/age_sq -> +statcast."""
+    results = []
+    for role, baseline_feats, no_sc_feats, full_feats in [
+        ("bat",   _BAT_FEATURES_BASELINE,   _BAT_FEATURES_NO_SC,   BAT_FEATURES),
+        ("pitch", _PITCH_FEATURES_BASELINE, _PITCH_FEATURES_NO_SC, PITCH_FEATURES),
+    ]:
+        role_df = prepared[prepared["role"] == role]
+        train, test = _split(role_df)
+        log.info("[features ablation, %s] baseline -> +prior_war/age_sq -> +statcast:", role)
+        results += [
+            _score(f"{role}: baseline", test["war"], _fit_predict(train, test, baseline_feats)),
+            _score(f"{role}: +prior_war +age_sq", test["war"], _fit_predict(train, test, no_sc_feats)),
+            _score(f"{role}: +statcast (full)", test["war"], _fit_predict(train, test, full_feats)),
+        ]
+    return results
+
+
 # ------------------------------------------------------------------ main ----
 
 def main() -> None:
     raw = _load_lag1_pairs()
     def_hist = _load_defense_history()
-    prepared = _prepare(raw, def_hist)
+    sc_hist = _load_statcast_history()
+    prepared = _prepare(raw, def_hist, sc_hist)
 
     log.info("=== pitch model (season N stats -> season N+1 WAR) ===")
     evaluate_role(prepared, "pitch", PITCH_FEATURES)
@@ -289,6 +321,9 @@ def main() -> None:
 
     log.info("=== extra batting features ablation ===")
     evaluate_batting_extra_features(prepared)
+
+    log.info("=== new features ablation: prior_war + age_sq ===")
+    evaluate_new_features_ablation(prepared)
 
 
 if __name__ == "__main__":

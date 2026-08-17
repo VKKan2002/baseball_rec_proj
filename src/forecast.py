@@ -15,11 +15,14 @@ from src.db import engine
 
 # Only columns available in BOTH season_stats (training) and projections_raw (inference)
 DEF_FEATURE = "prior_def_runs"
+SC_BAT_FEATURES = ["sc_xwoba", "sc_barrel_pct", "sc_exit_velo"]
+SC_PITCH_FEATURES = ["sc_xwoba", "sc_barrel_pct"]
 BAT_FEATURES = [
     "pa", "h", "hr", "bb", "so", "sb", "obp", "slg", DEF_FEATURE,
-    "age", "r", "rbi", "doubles", "triples", "cs",
+    "age", "age_sq", "r", "rbi", "doubles", "triples", "cs", "prior_war",
+    *SC_BAT_FEATURES,
 ]
-PITCH_FEATURES = ["ip", "era", "whip", "gs", "w", "l", "sv", "so9"]
+PITCH_FEATURES = ["ip", "era", "whip", "gs", "w", "l", "sv", "so9", "prior_war", *SC_PITCH_FEATURES]
 
 
 def _load_training_data() -> pd.DataFrame:
@@ -100,6 +103,7 @@ def _attach_prior_defense(df: pd.DataFrame, season_col: str, def_hist: pd.DataFr
     right = def_hist.copy()
     right["mlbam_id"] = right["mlbam_id"].astype("int64")
     right = right.rename(columns={"season": "_def_season", "def_runs": DEF_FEATURE})
+    right["_def_season"] = right["_def_season"].astype("int64")
 
     merged = pd.merge_asof(
         left.sort_values(season_col),
@@ -110,11 +114,97 @@ def _attach_prior_defense(df: pd.DataFrame, season_col: str, def_hist: pd.DataFr
     return merged.drop(columns="_def_season")
 
 
-def _train_models(df: pd.DataFrame, def_hist: pd.DataFrame):
+def _load_prior_war() -> pd.DataFrame:
+    """Total WAR per (mlbam_id, season, role) from actuals — used as a lag feature."""
+    query = """
+        SELECT mlbam_id, season, role, SUM(war) AS war
+        FROM war_actuals
+        WHERE war IS NOT NULL
+        GROUP BY mlbam_id, season, role
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn)
+
+
+def _attach_prior_war(df: pd.DataFrame, season_col: str, war_hist: pd.DataFrame) -> pd.DataFrame:
+    """Join each row to its player-role's most recent WAR from a season
+    strictly BEFORE season_col. Rookies or players with no prior season get
+    NaN, filled by SimpleImputer."""
+    left = df.copy()
+    left["mlbam_id"] = left["mlbam_id"].astype("int64")
+    left[season_col] = left[season_col].astype("int64")
+
+    right = war_hist.copy()
+    right["mlbam_id"] = right["mlbam_id"].astype("int64")
+    right = right.rename(columns={"season": "_war_season", "war": "prior_war"})
+    right["_war_season"] = right["_war_season"].astype("int64")
+
+    merged = pd.merge_asof(
+        left.sort_values(season_col),
+        right.sort_values("_war_season"),
+        left_on=season_col, right_on="_war_season",
+        by=["mlbam_id", "role"], direction="backward", allow_exact_matches=False,
+    )
+    return merged.drop(columns="_war_season")
+
+
+def _add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["age_sq"] = df["age"] ** 2
+    return df
+
+
+def _load_statcast_history() -> pd.DataFrame:
+    query = """
+        SELECT mlbam_id, season, role, xwoba, barrel_pct, exit_velo_avg
+        FROM statcast_stats
+    """
+    with engine.connect() as conn:
+        return pd.read_sql(text(query), conn)
+
+
+def _attach_statcast(df: pd.DataFrame, season_col: str, sc_hist: pd.DataFrame,
+                     role: str, exact: bool) -> pd.DataFrame:
+    """Join Statcast features for the given role onto df.
+
+    exact=True: matches the same season (training — season N Statcast -> season N+1 WAR).
+    exact=False: most recent season strictly before season_col (inference — 2026 gets 2025).
+    """
+    left = df.copy()
+    left[season_col] = left[season_col].astype("int64")
+    left["mlbam_id"] = left["mlbam_id"].astype("int64")
+
+    right = sc_hist[sc_hist["role"] == role].drop(columns="role").copy()
+    right["mlbam_id"] = right["mlbam_id"].astype("int64")
+    right["season"] = right["season"].astype("int64")
+    right = right.rename(columns={
+        "season": "_sc_season",
+        "xwoba": "sc_xwoba",
+        "barrel_pct": "sc_barrel_pct",
+        "exit_velo_avg": "sc_exit_velo",
+    })
+
+    merged = pd.merge_asof(
+        left.sort_values(season_col),
+        right.sort_values("_sc_season"),
+        left_on=season_col, right_on="_sc_season",
+        by="mlbam_id", direction="backward",
+        allow_exact_matches=exact,
+    )
+    return merged.drop(columns="_sc_season")
+
+
+def _train_models(df: pd.DataFrame, def_hist: pd.DataFrame, war_hist: pd.DataFrame,
+                  sc_hist: pd.DataFrame):
     df = df.replace([np.inf, -np.inf], np.nan)
+    df = _add_derived_features(df)
     bat_df = df[df["role"] == "bat"]
     bat_df = _attach_prior_defense(bat_df, "season", def_hist)
+    bat_df = _attach_prior_war(bat_df, "season", war_hist)
+    bat_df = _attach_statcast(bat_df, "season", sc_hist, "bat", exact=True)
     pit_df = df[df["role"] == "pitch"]
+    pit_df = _attach_prior_war(pit_df, "season", war_hist)
+    pit_df = _attach_statcast(pit_df, "season", sc_hist, "pitch", exact=True)
 
     # Batting: linear (Ridge) beat every alternative tested (ElasticNet,
     # RandomForest, XGBoost, a Ridge+XGBoost blend) -- see
@@ -178,10 +268,16 @@ def _load_projections() -> pd.DataFrame:
         return pd.read_sql(text(query), conn)
 
 
-def _predict(df: pd.DataFrame, bat_model, pitch_model, def_hist: pd.DataFrame) -> pd.DataFrame:
+def _predict(df: pd.DataFrame, bat_model, pitch_model, def_hist: pd.DataFrame,
+             war_hist: pd.DataFrame, sc_hist: pd.DataFrame) -> pd.DataFrame:
+    df = _add_derived_features(df)
     bat = df[df["role"] == "bat"].copy()
     bat = _attach_prior_defense(bat, "season", def_hist)
+    bat = _attach_prior_war(bat, "season", war_hist)
+    bat = _attach_statcast(bat, "season", sc_hist, "bat", exact=False)
     pit = df[df["role"] == "pitch"].copy()
+    pit = _attach_prior_war(pit, "season", war_hist)
+    pit = _attach_statcast(pit, "season", sc_hist, "pitch", exact=False)
 
     bat["projected_war"] = bat_model.predict(bat[BAT_FEATURES])
     pit["projected_war"] = pitch_model.predict(pit[PITCH_FEATURES])
@@ -213,9 +309,11 @@ def _write(df: pd.DataFrame) -> None:
 def main() -> None:
     training_data = _load_training_data()
     def_hist = _load_defense_history()
-    bat_model, pitch_model = _train_models(training_data, def_hist)
+    war_hist = _load_prior_war()
+    sc_hist = _load_statcast_history()
+    bat_model, pitch_model = _train_models(training_data, def_hist, war_hist, sc_hist)
     projections = _load_projections()
-    predictions = _predict(projections, bat_model, pitch_model, def_hist)
+    predictions = _predict(projections, bat_model, pitch_model, def_hist, war_hist, sc_hist)
     _write(predictions)
 
 

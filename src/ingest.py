@@ -31,7 +31,7 @@ if str(_ROOT) not in sys.path:
 
 from src.config import RAW_DIR, SNAPSHOTS_DIR  # noqa: E402
 from src.db import engine  # noqa: E402
-from src.models import Base, Player, ProjectionRaw, SeasonStats, WarActual  # noqa: E402
+from src.models import Base, Player, ProjectionRaw, SeasonStats, StatcastStats, WarActual  # noqa: E402
 
 # bref will 429/temporarily-block a burst of requests with no delay between
 # them (this is what killed 2020-2025 previously). Cache successful pulls to
@@ -43,7 +43,8 @@ _REQUEST_DELAY_SEC = 5.0
 _MAX_RETRIES = 4
 _BACKOFF_BASE_SEC = 20.0
 
-TRAIN_SEASONS = range(2014, 2026)  # 2014..2025 inclusive, ~12 years for the WAR estimator
+TRAIN_SEASONS = range(2014, 2026)     # 2014..2025 inclusive, ~12 years for the WAR estimator
+STATCAST_SEASONS = range(2015, 2026)  # Statcast data starts 2015
 
 logging.basicConfig(
     level=logging.INFO,
@@ -276,6 +277,85 @@ def load_season_stats(as_of: date) -> None:
     _write(df, SeasonStats.__tablename__, as_of=as_of)
 
 
+# ---------------------------------------------------------- statcast stats ----
+
+def _fetch_statcast_year(year: int, role: str) -> pd.DataFrame:
+    """Merge expected-stats (xwoba) + exitvelo-barrels (barrel%, hard_hit%, exit_velo) for one year/role."""
+    if role == "bat":
+        exp_fn  = lambda y: pyb.statcast_batter_expected_stats(y, minPA=25)
+        evb_fn  = lambda y: pyb.statcast_batter_exitvelo_barrels(minBBE=25, year=y)
+    else:
+        exp_fn  = lambda y: pyb.statcast_pitcher_expected_stats(y, minPA=25)
+        evb_fn  = lambda y: pyb.statcast_pitcher_exitvelo_barrels(minBBE=25, year=y)
+
+    exp = _with_retry(exp_fn, year, label=f"statcast_{role}_expected({year})")
+    time.sleep(_REQUEST_DELAY_SEC)
+    evb = _with_retry(evb_fn, year, label=f"statcast_{role}_exitvelo({year})")
+
+    # expected_stats: player_id, year, est_woba (=xwoba)
+    exp = exp.rename(columns={"player_id": "mlbam_id", "est_woba": "xwoba"})
+    exp = exp[["mlbam_id", "xwoba"]].copy()
+
+    # exitvelo_barrels: player_id, avg_hit_speed, ev95percent, brl_percent
+    evb = evb.rename(columns={
+        "player_id":  "mlbam_id",
+        "avg_hit_speed": "exit_velo_avg",
+        "ev95percent":   "hard_hit_pct",
+        "brl_percent":   "barrel_pct",
+    })
+    evb = evb[["mlbam_id", "exit_velo_avg", "hard_hit_pct", "barrel_pct"]].copy()
+
+    df = pd.merge(exp, evb, on="mlbam_id", how="outer")
+    df["mlbam_id"] = pd.to_numeric(df["mlbam_id"], errors="coerce")
+    df = df.dropna(subset=["mlbam_id"])
+    df["mlbam_id"] = df["mlbam_id"].astype(int)
+    df["season"] = year
+    df["role"] = role
+    # sweet_spot_pct not fetched — leave null, imputer handles it
+    df["sweet_spot_pct"] = float("nan")
+    return df
+
+
+def fetch_statcast(as_of: date) -> pd.DataFrame:
+    """Fetch Statcast leaderboards for STATCAST_SEASONS."""
+    frames: list[pd.DataFrame] = []
+    failed: list[tuple[int, str]] = []
+    for year in STATCAST_SEASONS:
+        log.info("fetching statcast bat + pitch for %d...", year)
+        for role in ("bat", "pitch"):
+            try:
+                frames.append(_fetch_statcast_year(year, role))
+            except Exception as exc:  # noqa: BLE001
+                log.error("statcast %s %d failed: %s", role, year, exc)
+                failed.append((year, role))
+            time.sleep(_REQUEST_DELAY_SEC)
+
+    if failed:
+        log.error("statcast: failed pairs: %s", failed)
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    df["as_of_date"] = as_of
+    valid = {c.name for c in StatcastStats.__table__.columns}
+    return df[[c for c in df.columns if c in valid]]
+
+
+def load_statcast(as_of: date) -> None:
+    df = fetch_statcast(as_of)
+    if df.empty:
+        log.warning("no statcast rows fetched")
+        return
+    _snapshot(df, "statcast_stats", as_of)
+    # statcast_stats has no as_of_date column — it's a static leaderboard
+    # snapshot keyed by (mlbam_id, season, role). Truncate and reload.
+    with engine.begin() as conn:
+        conn.execute(text("TRUNCATE statcast_stats"))
+    df = df.drop(columns=["as_of_date"], errors="ignore")
+    df.to_sql(StatcastStats.__tablename__, engine, if_exists="append", index=False, chunksize=5000)
+    log.info("wrote     %-18s rows=%d", "statcast_stats", len(df))
+
+
 # ------------------------------------------------------- projections raw ----
 
 _HIT_RENAME = {
@@ -372,6 +452,7 @@ def main(as_of: date | None = None) -> None:
     load_players()
     load_war_actuals(as_of)
     load_season_stats(as_of)
+    load_statcast(as_of)
     load_projections(as_of)
 
     log.info("ingest complete")

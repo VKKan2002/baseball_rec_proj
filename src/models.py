@@ -215,6 +215,26 @@ class Valuation(Base):
     salary_estimated: Mapped[bool] = mapped_column(Boolean)
 
 
+class StatcastStats(Base):
+    """Pre-aggregated Statcast leaderboard data from Baseball Savant (via pybaseball).
+
+    One row per (mlbam_id, season, role). Covers 2015+. Used as additional
+    features in forecast.py alongside season_stats. Role='bat' rows come from
+    statcast_batter_expected_stats; role='pitch' rows from the pitcher equivalent.
+    """
+    __tablename__ = "statcast_stats"
+
+    mlbam_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    season: Mapped[int] = mapped_column(Integer, primary_key=True)
+    role: Mapped[str] = mapped_column(String(5), primary_key=True)  # 'bat' | 'pitch'
+
+    xwoba: Mapped[float | None] = mapped_column(Float, nullable=True)
+    barrel_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_velo_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sweet_spot_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hard_hit_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 class Resolution(Base):
     """Links a raw projection row to a canonical player (or marks it unresolved).
 
